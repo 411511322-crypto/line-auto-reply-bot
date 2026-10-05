@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from flask import Flask, request, abort
+import google.generativeai as genai
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -23,29 +24,46 @@ app = Flask(__name__)
 # 讀取 LINE Channel 憑證
 channel_secret = os.getenv("LINE_CHANNEL_SECRET")
 channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+gemini_api_key = os.getenv("GEMINI_API_KEY")
 
 if not channel_secret or not channel_access_token:
     print("【警告】未讀取到 LINE_CHANNEL_SECRET 或 LINE_CHANNEL_ACCESS_TOKEN，請檢查 .env 檔案設定！")
 
+# 初始化 LINE SDK
 configuration = Configuration(access_token=channel_access_token)
 handler = WebhookHandler(channel_secret)
+
+# 初始化 Google Gemini AI
+gemini_model = None
+if gemini_api_key:
+    try:
+        genai.configure(api_key=gemini_api_key)
+        gemini_model = genai.GenerativeModel(
+            model_name="gemini-flash-latest",
+            system_instruction=(
+                "你是一位親切、熱情且專業的 LINE 智慧客服助理。"
+                "請始終使用繁體中文（台灣習慣用語）簡明扼要地回答使用者的任何問題。"
+                "回答風格保持自然有禮，排版適當空行，非常適合在手機通訊軟體上閱讀。"
+                "若使用者詢問公司內部專案或具體訂單，但你無法確定時，可引導使用者輸入「客服」以聯繫真人專員。"
+            )
+        )
+        print("【成功】Google Gemini AI 已成功啟用！")
+    except Exception as e:
+        print(f"【錯誤】Gemini 初始化失敗：{e}")
+else:
+    print("【提示】未設定 GEMINI_API_KEY，將僅使用固定關鍵字模式。")
 
 
 @app.route("/", methods=["GET"])
 def index():
-    return "LINE Auto Reply Bot is running!", 200
+    return "LINE Auto Reply Bot with Gemini AI is running!", 200
 
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    # 取得 LINE 簽章 header
     signature = request.headers.get("X-Line-Signature", "")
-
-    # 取得請求內容
     body = request.get_data(as_text=True)
-    app.logger.info(f"Request body: {body}")
 
-    # 驗證簽章並處理事件
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -61,12 +79,8 @@ def handle_message(event):
     user_id = event.source.user_id
     app.logger.info(f"收到來自使用者 {user_id} 的訊息：{user_text}")
 
-    # ===== 自訂關鍵字自動回覆邏輯 =====
-    # 你可以依據需求自由新增、修改關鍵字與回覆內容
-    if user_text in ["你好", "嗨", "哈囉", "hello", "hi", "Hi", "Hello"]:
-        reply_text = "您好！很高興為您服務 😊\n輸入「選單」或「幫助」可查看更多服務說明！"
-
-    elif user_text in ["選單", "目錄", "幫助", "help", "說明"]:
+    # ===== 1. 優先匹配官方固定業務指令 (避免 AI 幻覺) =====
+    if user_text in ["選單", "目錄", "幫助", "help", "說明"]:
         reply_text = (
             "📋 【服務選單】\n"
             "------------------------\n"
@@ -75,9 +89,8 @@ def handle_message(event):
             "🔹 輸入「常見問題」：查看 FAQ\n"
             "🔹 輸入「最新活動」：查看本期特惠活動\n"
             "------------------------\n"
-            "請直接回覆您想查詢的項目名稱。"
+            "💡 提示：您也可以直接問我任何問題（例如：天氣、生活常識、寫程式、生活大小事），AI 助理會為您即時解答！"
         )
-
     elif user_text == "營業時間":
         reply_text = "⏰ 【營業時間】\n週一至週五：09:00 - 18:00\n週六、日及國定假日休息。"
 
@@ -96,11 +109,26 @@ def handle_message(event):
     elif user_text == "最新活動":
         reply_text = "🎉 【最新活動】\n現在加入官方帳號，結帳輸入折扣碼「WELCOME」現折 100 元！"
 
+    # ===== 2. 其餘任何訊息 ➜ 由 Google Gemini AI 智慧解答 =====
     else:
-        # 預設回覆（當輸入未匹配的關鍵字時）
-        reply_text = f"已收到您的訊息：「{user_text}」\n目前非人工客服時段，若有急事請輸入「選單」查看指引，或留下詳細需求，我們會於上班時間回覆您！"
+        if gemini_model:
+            try:
+                # 呼叫 Gemini AI 生成回覆
+                ai_response = gemini_model.generate_content(user_text)
+                reply_text = ai_response.text.strip()
+                # 確保不超過 LINE 訊息 5000 字限制
+                if len(reply_text) > 4000:
+                    reply_text = reply_text[:4000] + "..."
+            except Exception as e:
+                app.logger.error(f"Gemini API 處理錯誤: {e}")
+                reply_text = (
+                    "抱歉，目前 AI 正在熱烈思考中，請稍候片刻再試一次！\n"
+                    "您也可以輸入「選單」查看常用功能指引。"
+                )
+        else:
+            reply_text = f"已收到您的訊息：「{user_text}」\n若有任何需要，請輸入「選單」查看更多功能！"
 
-    # 發送回覆訊息給使用者
+    # 發送回覆給使用者
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
