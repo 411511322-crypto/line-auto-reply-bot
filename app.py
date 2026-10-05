@@ -129,14 +129,19 @@ def handle_message(event):
             reply_text = f"已收到您的訊息：「{user_text}」\n若有任何需要，請輸入「選單」查看更多功能！"
 
     # 發送回覆給使用者
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+    app.logger.info(f"準備發送回覆內容：{reply_text}")
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
             )
-        )
+        app.logger.info("【成功】已成功發送訊息給使用者！")
+    except Exception as e:
+        app.logger.error(f"【失敗】呼叫 LINE Reply API 發生錯誤：{e}")
 
 
 if __name__ == "__main__":
